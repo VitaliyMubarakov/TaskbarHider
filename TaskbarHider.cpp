@@ -21,7 +21,7 @@ bool IsAlreadyRunning(const wchar_t* mutexName = L"MyTaskbarManagerMutex")
 
 int main() {
     if (IsAlreadyRunning()) {
-        MessageBoxW(NULL, L"Программа уже запущена!", L"Taskbar Manager", MB_OK | MB_ICONWARNING);
+        MessageBoxW(NULL, L"The program is already running!", L"Taskbar Manager", MB_OK | MB_ICONWARNING);
         return 0;
     }
 
