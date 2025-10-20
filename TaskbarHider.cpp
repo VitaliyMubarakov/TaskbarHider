@@ -1,89 +1,71 @@
 ﻿#include "src/taskbarManager.h"
-#include "libs/IniParser.h"
+#include "src/taskbarTray.h"
 
 using namespace std;
 
-std::string getDirectory(const std::string& fullPath) {
-    size_t pos = fullPath.find_last_of("/\\");
-    if (pos == std::string::npos) {
-        return "";
-    }
-    return fullPath.substr(0, pos);
-}
+bool IsAlreadyRunning(const wchar_t* mutexName = L"MyTaskbarManagerMutex")
+{
+    HANDLE hMutex = CreateMutexW(NULL, TRUE, mutexName);
 
-bool GetBoolFromIni(const std::string& value) {
-    std::string lowerValue = value;
-    std::transform(lowerValue.begin(), lowerValue.end(), lowerValue.begin(), ::tolower);
+    if (hMutex == NULL)
+        return false;
 
-    if (lowerValue == "true" || lowerValue == "1" || lowerValue == "yes" ||
-        lowerValue == "on" || lowerValue == "enabled") {
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(hMutex);
         return true;
     }
-
-    if (lowerValue == "false" || lowerValue == "0" || lowerValue == "no" ||
-        lowerValue == "off" || lowerValue == "disabled") {
-        return false;
-    }
-
     return false;
 }
 
-void INIData() {
-    IniParser parser;
-
-    try {
-        char path[MAX_PATH];
-        GetModuleFileName(nullptr, path, MAX_PATH);
-        std::cout << "Текущий путь к исполняемому файлу: " << getDirectory(path) << std::endl;
-
-        parser.createIniFile(getDirectory(path));
-
-        parser.parseFromFile("settings.ini");
-
-        mouseAboveMs = std::stoi(parser.getValue("Taskbar", "mouseAboveMs"));
-        screenPercentToHide = std::stoi(parser.getValue("Taskbar", "screenPercentToHide"));
-
-        if (screenPercentToHide < 0 || screenPercentToHide > 100) {
-            cout << "[ERROR] screenPercentToHide value (0-100): " << screenPercentToHide << endl;
-            screenPercentToHide = 50;
-        }
-
-        if (mouseAboveMs < 0) {
-            cout << "[ERROR] mouseAboveMs value (0-99999): " << mouseAboveMs << endl;
-            mouseAboveMs = 5000;
-        }
-
-        cout << "mouseAboveMs: " << mouseAboveMs << endl;
-        cout << "screenPercentToHide: " << screenPercentToHide << endl;
-
-        parser.saveToFile("settings.ini");
-    }
-    catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return;
-    }
-}
+#define ID_BUTTON_CLOSE 2001
 
 int main() {
-    HWND hWnd = GetConsoleWindow();
-
-#if defined _DEBUG
-    ShowWindow(hWnd, SW_SHOW);
-#else
-    ShowWindow(hWnd, SW_HIDE);
-#endif
-
-    SetRussianLang();
-
-    INIData();
-
-    auto future = std::async(std::launch::async, checkMousePosUpdate);
-
-    HWND bridge = GetTaskbarCompositionBridge();
-    if (!bridge) {
-        std::cout << "DesktopWindowContentBridge not found" << std::endl;
+    if (IsAlreadyRunning()) {
+        MessageBoxW(NULL, L"Программа уже запущена!", L"Taskbar Manager", MB_OK | MB_ICONWARNING);
         return 0;
     }
+
+    SetRussianLang();
+    INIData();
+
+    const wchar_t CLASS_NAME[] = L"TaskbarMainWindow";
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = CLASS_NAME;
+    RegisterClassW(&wc);
+
+    HWND hWndMain = CreateWindowW(CLASS_NAME, L"Taskbar Manager", WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 200, 80,
+        NULL, NULL, GetModuleHandle(NULL), NULL);
+
+    HWND hWndClose = CreateWindowW(
+        L"BUTTON",
+        L"Закрыть",
+        WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+        30, 20, 120, 30,
+        hWndMain,
+        (HMENU)ID_BUTTON_CLOSE,
+        GetModuleHandle(NULL),
+        NULL
+    );
+
+    InitTray(GetModuleHandle(NULL), hWndMain);
+
+    std::thread(checkMousePosUpdate).detach();
+
+    MSG msg;
+    while (GetMessageW(&msg, NULL, 0, 0)) {
+        if (msg.message == WM_COMMAND && LOWORD(msg.wParam) == ID_BUTTON_CLOSE) {
+            RemoveTray();
+            PostQuitMessage(0);
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    RemoveTray();
+    return 0;
 }
 
 #ifdef _WIN32

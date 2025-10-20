@@ -1,4 +1,5 @@
 #include "./taskbarManager.h"
+#include "..\libs\iniParser.h"
 
 bool isTaskbarHidden = true;
 int mouseAboveMs = 5000;
@@ -8,22 +9,24 @@ POINT pt;
 chrono::steady_clock::time_point mouseAboveStartTime;
 bool isMouseAbove = false;
 
-static bool transitionInProgress = false;
+static std::atomic_bool transitionInProgress = false;
+static std::mutex transitionMutex;
 
 HWND GetTaskbarWindow() {
-    return FindWindow("Shell_TrayWnd", NULL);
+    return FindWindowW(L"Shell_TrayWnd", NULL);
 }
 
 HWND GetTaskbarReBar() {
     HWND taskbar = GetTaskbarWindow();
     if (!taskbar) return NULL;
-    return FindWindowEx(taskbar, NULL, "ReBarWindow32", NULL);
+    return FindWindowExW(taskbar, NULL, L"ReBarWindow32", NULL);
 }
 
 HWND GetTaskbarCompositionBridge() {
     HWND taskbar = GetTaskbarWindow();
     if (!taskbar) return NULL;
-    return FindWindowEx(taskbar, NULL, "Windows.UI.Composition.DesktopWindowContentBridge", NULL);
+    return taskbar;
+    //return FindWindowExW(taskbar, NULL, L"Windows.UI.Composition.DesktopWindowContentBridge", NULL);
 }
 
 void HideWindowSimple(HWND hwnd) {
@@ -39,7 +42,6 @@ void HideTaskbar() {
     if (bar) {
         HideWindowSimple(bar);
         isTaskbarHidden = true;
-        //cout << "Taskbar скрыт" << endl;
     }
 }
 
@@ -48,15 +50,16 @@ void ShowTaskbar() {
     if (bar) {
         ShowWindowSimple(bar);
         isTaskbarHidden = false;
-        //cout << "Taskbar показан" << endl;
     }
 }
 
 void smoothTransitionTransparency(HWND hWnd, BYTE targetAlpha, int durationMs) {
-    if (!hWnd) return;
+    if (!hWnd || !IsWindow(hWnd)) return;
 
     LONG_PTR style = GetWindowLongPtr(hWnd, GWL_EXSTYLE);
-    if (!(style & WS_EX_LAYERED)) SetWindowLongPtr(hWnd, GWL_EXSTYLE, style | WS_EX_LAYERED);
+    if (!(style & WS_EX_LAYERED)) {
+        SetWindowLongPtr(hWnd, GWL_EXSTYLE, style | WS_EX_LAYERED);
+    }
 
     BYTE startAlpha = 255;
     DWORD flags = 0;
@@ -80,7 +83,7 @@ void smoothTransitionTransparency(HWND hWnd, BYTE targetAlpha, int durationMs) {
         float newAlphaF = startAlpha + increment * i;
         BYTE newAlpha = static_cast<BYTE>(std::clamp(newAlphaF, 0.0f, 255.0f));
 
-        SetLayeredWindowAttributes(hWnd, RGB(0, 0, 0), newAlpha, LWA_ALPHA | LWA_COLORKEY);
+        SetLayeredWindowAttributes(hWnd, RGB(0, 0, 0), newAlpha, LWA_ALPHA);
 
         while (elapsedMs < frameDuration * i) {
             QueryPerformanceCounter(&currentTime);
@@ -88,17 +91,18 @@ void smoothTransitionTransparency(HWND hWnd, BYTE targetAlpha, int durationMs) {
         }
     }
 
-    SetLayeredWindowAttributes(hWnd, RGB(0, 0, 0), targetAlpha, LWA_ALPHA | LWA_COLORKEY);
+    SetLayeredWindowAttributes(hWnd, RGB(0, 0, 0), targetAlpha, LWA_ALPHA);
 }
 
 void checkMousePosUpdate() {
     static bool hideTriggered = false;
     static std::future<void> transitionFuture;
-    static bool transitionInProgress = false;
     static bool isHiding = false;
-    int screenHeight = GetSystemMetrics(SM_CYSCREEN) - GetSystemMetrics(SM_CYSCREEN) * (screenPercentToHide / 100.0f);
 
     while (true) {
+        int screenHeight = GetSystemMetrics(SM_CYSCREEN) -
+            GetSystemMetrics(SM_CYSCREEN) * (screenPercentToHide / 100.0f);
+
         GetCursorPos(&pt);
         bool currentlyAbove = (pt.y < screenHeight);
 
@@ -117,8 +121,13 @@ void checkMousePosUpdate() {
                     transitionFuture.wait();
                     transitionInProgress = false;
                 }
+
                 ShowTaskbar();
-                std::async(std::launch::async, smoothTransitionTransparency, bar, 255, 100);
+                if (bar) {
+                    std::lock_guard<std::mutex> lock(transitionMutex);
+                    std::async(std::launch::async, smoothTransitionTransparency, bar, 255, 100);
+                }
+
                 isTaskbarHidden = false;
                 isHiding = false;
             }
@@ -142,8 +151,11 @@ void checkMousePosUpdate() {
                 hideTriggered = true;
                 isHiding = true;
                 auto bar = GetTaskbarCompositionBridge();
-                transitionFuture = std::async(std::launch::async, smoothTransitionTransparency, bar, 0, 100);
-                transitionInProgress = true;
+                if (bar) {
+                    std::lock_guard<std::mutex> lock(transitionMutex);
+                    transitionFuture = std::async(std::launch::async, smoothTransitionTransparency, bar, 0, 100);
+                    transitionInProgress = true;
+                }
             }
         }
 
@@ -153,6 +165,73 @@ void checkMousePosUpdate() {
 
 void SetRussianLang()
 {
-    SetConsoleCP(1251);
-    SetConsoleOutputCP(1251);
+    SetConsoleCP(CP_UTF8);
+    SetConsoleOutputCP(CP_UTF8);
+}
+
+std::string getDirectory(const std::string& fullPath) {
+    size_t pos = fullPath.find_last_of("/\\");
+    if (pos == std::string::npos) {
+        return "";
+    }
+    return fullPath.substr(0, pos);
+}
+
+bool GetBoolFromIni(const std::string& value) {
+    std::string lowerValue = value;
+    std::transform(lowerValue.begin(), lowerValue.end(), lowerValue.begin(), ::tolower);
+
+    if (lowerValue == "true" || lowerValue == "1" || lowerValue == "yes" ||
+        lowerValue == "on" || lowerValue == "enabled") {
+        return true;
+    }
+
+    if (lowerValue == "false" || lowerValue == "0" || lowerValue == "no" ||
+        lowerValue == "off" || lowerValue == "disabled") {
+        return false;
+    }
+
+    return false;
+}
+
+void INIData() {
+    IniParser parser;
+
+    try {
+        wchar_t wpath[MAX_PATH];
+        GetModuleFileNameW(nullptr, wpath, MAX_PATH);
+
+        int size_needed = WideCharToMultiByte(CP_UTF8, 0, wpath, -1, NULL, 0, NULL, NULL);
+        std::string path(size_needed, 0);
+        WideCharToMultiByte(CP_UTF8, 0, wpath, -1, &path[0], size_needed, NULL, NULL);
+
+        if (!path.empty() && path.back() == '\0') path.pop_back();
+        std::cout << "Текущий путь к исполняемому файлу: " << getDirectory(path) << std::endl;
+
+        parser.createIniFile(getDirectory(path));
+
+        parser.parseFromFile("settings.ini");
+
+        mouseAboveMs = std::stoi(parser.getValue("Taskbar", "mouseAboveMs"));
+        screenPercentToHide = std::stoi(parser.getValue("Taskbar", "screenPercentToHide"));
+
+        if (screenPercentToHide < 0 || screenPercentToHide > 100) {
+            cout << "[ERROR] screenPercentToHide value (0-100): " << screenPercentToHide << endl;
+            screenPercentToHide = 50;
+        }
+
+        if (mouseAboveMs < 0) {
+            cout << "[ERROR] mouseAboveMs value (0-99999): " << mouseAboveMs << endl;
+            mouseAboveMs = 5000;
+        }
+
+        cout << "mouseAboveMs: " << mouseAboveMs << endl;
+        cout << "screenPercentToHide: " << screenPercentToHide << endl;
+
+        parser.saveToFile("settings.ini");
+    }
+    catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return;
+    }
 }

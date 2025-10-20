@@ -3,6 +3,8 @@
 #include <future>
 #include <chrono>
 #include <iostream>
+#include <atomic>
+#include <mutex>
 using namespace std;
 
 extern bool isTaskbarHidden;
@@ -21,3 +23,9 @@ void smoothTransitionTransparency(HWND hWnd, BYTE targetAlpha, int durationMs);
 void checkMousePosUpdate();
 
 void SetRussianLang();
+
+std::string getDirectory(const std::string& fullPath);
+
+bool GetBoolFromIni(const std::string& value);
+
+void INIData();
